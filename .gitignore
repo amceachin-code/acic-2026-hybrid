@@ -1,0 +1,9 @@
+# Outputs from run_example.sh and ad hoc runs
+example/output/
+output/
+
+# OS / R clutter
+.DS_Store
+.Rhistory
+.RData
+.Rproj.user/
