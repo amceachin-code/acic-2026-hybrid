@@ -10,10 +10,10 @@ The repository contains the method code, a simulator, and **50 simulated example
 git clone https://github.com/amceachin-code/acic-2026-hybrid.git
 cd acic-2026-hybrid
 
-bash setup.sh                  # install grf, ranger, sandwich (R >= 4.1)
-Rscript tests/run_tests.R      # quick checks (~5 s)
+bash setup.sh                  # install grf (R >= 4.1)
+Rscript tests/run_tests.R      # quick checks (about 1 s)
 
-bash run_example.sh 50 4       # fit all 50 example datasets on 4 cores (~5 min)
+bash run_example.sh 50 4       # fit all 50 example datasets on 4 cores (4 to 5 min)
 ```
 
 `run_example.sh` writes outputs to `example/output/` and prints a scorecard against the true effects:
@@ -24,6 +24,7 @@ bash run_example.sh 50 4       # fit all 50 example datasets on 4 cores (~5 min)
 | iCATE 95% CI coverage | 0.943 | 0.970 |
 | Treatment assignment accuracy | 0.886 | 1.000 |
 | sCATE 95% CI coverage | 0.940 | 1.000 |
+| subCATE 95% CI coverage | 0.770 | 0.750 |
 | PATE 95% CI coverage | 0.850 | 1.000 |
 
 ## Using it on your own data
@@ -39,7 +40,10 @@ Your file needs the ACIC 2026 layout: one row per unit, with columns `ID`, `y` (
 ```bash
 Rscript R/run_hybrid.R my_data/data_1.csv results/            # PATE falls back to sCATE
 Rscript R/run_hybrid.R my_data/data_1.csv results/ pop.csv    # model-based PATE
+Rscript R/run_hybrid.R my_data/data_1.csv results/ "" 123    # custom seed, no pop file
 ```
+
+The seed controls the Horseshoe sampler; GRF uses a fixed seed (42). Name input files `data_<id>.csv`: `<id>` is used in the output names, and other names all map to id 1.
 
 `pop.csv` is optional. It holds the population means of the 54 encoded covariates (a `mean` column, in the column order of `prepare_covariates()`). See `example/data/pop/` for the format.
 
@@ -80,7 +84,7 @@ All weights and multipliers were tuned on simulated data. In a 500-dataset out-o
 Rscript dgp/generate_data.R my_sims 200 balanced    # 200 pairs, balanced CATE mix
 ```
 
-Presets: `mostly_constant` (the mix used for tuning, and the default) and `balanced`. Each pair has a train and a test file from the same DGP, true iCATEs for both, exact population covariate means, and the true PATE (in `metadata.csv`). `R/evaluate.R <data_dir> <pred_dir>` scores any run.
+Presets: `mostly_constant` (the mix used for tuning, and the default) and `balanced`. Each pair has a train and a test file from the same DGP, true iCATEs for both, exact population covariate means, and the true PATE (in `metadata.csv`). `R/evaluate.R <data_dir> <pred_dir> [train|test]` scores a run on either split (for example, after running the method on the test files). The train/test pairs are also there for your own out-of-sample experiments.
 
 ## Repository layout
 
@@ -117,6 +121,7 @@ Presets: `mostly_constant` (the mix used for tuning, and the default) and `balan
 
 ## Known limitations
 
+- subCATE intervals undercover (77% on the example): the standard error is computed for the n-denominator form of the estimand, while the reported estimate is the within-stratum mean.
 - PATE intervals undercover (85% on the example), because the PATE z-multiplier was never tuned.
 - Coverage is weaker for smooth nonlinear and interaction CATE surfaces than for constant ones.
 - The covariate encoding is fixed at the 40-covariate ACIC layout (54 encoded columns).

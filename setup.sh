@@ -2,10 +2,9 @@
 # ===========================================================================
 # setup.sh -- Install R package dependencies for the Hybrid ensemble
 #
-# The pipeline requires only 3 R packages:
+# The pipeline requires one R package:
 #   - grf       (multi-arm causal forests)
-#   - ranger    (random forests for nuisance models)
-#   - sandwich  (HC1 robust standard errors)
+# The Horseshoe sampler and the simulator use base R only.
 #
 # Usage:
 #   bash setup.sh
@@ -33,12 +32,12 @@ echo ""
 # ---------------------------------------------------------------------------
 # Install packages (idempotent: skips if already installed)
 # ---------------------------------------------------------------------------
-echo "Installing R packages (grf, ranger, sandwich)..."
+echo "Installing R package: grf..."
 echo "This may take a few minutes on first run."
 echo ""
 
 Rscript -e '
-pkgs <- c("grf", "ranger", "sandwich")
+pkgs <- c("grf")
 installed <- rownames(installed.packages())
 to_install <- setdiff(pkgs, installed)
 

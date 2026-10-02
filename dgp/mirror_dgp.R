@@ -44,6 +44,10 @@ IDX_BIN  <- 21:39    # Binary columns
 IDX_CONT <- 40:51    # Continuous [0,1] columns
 IDX_ZI   <- 52:54    # Zero-inflated columns
 
+# Number of levels of the categorical covariates x1-x6. One-hot encoding with
+# level 1 dropped gives sum(CAT_LEVELS - 1) = 20 columns.
+CAT_LEVELS <- c(x1 = 3, x2 = 4, x3 = 3, x4 = 5, x5 = 4, x6 = 7)
+
 
 # =============================================================================
 # generate_acic_covariates(): Generate the 54-column covariate matrix X
@@ -57,7 +61,7 @@ IDX_ZI   <- 52:54    # Zero-inflated columns
 #   - x38-x40: 3 zero-inflated (point mass at 0 + Uniform(0,1))
 #
 # Args:
-#   n          — sample size (default 1000)
+#   n          — sample size
 #   bin_probs  — Bernoulli probabilities for x7-x25 (19-vector, or NULL for random)
 #   zero_fracs — zero-inflation fractions for x38-x40 (3-vector, or NULL for random)
 #
@@ -191,7 +195,7 @@ compute_cate_surface <- function(X, params) {
 # var(mu_a) in a realistic range (varies by draw) instead of a fixed low value.
 #
 # Args:
-#   sub_seed — seed for reproducibility (derived from the rep's param_seed)
+#   sub_seed — seed for the outcome-surface draw
 #
 # Returns: list(cols, coefs, quad_idx, intercept) — the mu_a_spec structure
 #   cols      — which of the 54 covariate columns to use
@@ -298,13 +302,16 @@ draw_acic_params_v2 <- function(seed, real_r2 = NULL, real_y_mean = NULL,
   # Uses draw_complex_mu_a_spec() which selects 6-10 covariates with
   # random linear + quadratic coefficients. Produces much higher var(mu_a)
   # than a fixed formula.
+  # Note: draw_complex_mu_a_spec() calls set.seed(seed + 22222), so every
+  # draw below this line comes from that stream. This is deterministic and
+  # kept as-is so the bundled example data stays reproducible.
   mu_a_spec <- draw_complex_mu_a_spec(seed + 22222)
 
   # --- Target R² ---
   # Resample from a user-supplied vector if given; otherwise draw from the
   # parametric default. Noise is calibrated at generation time to hit this R².
   if (!is.null(real_r2)) {
-    target_r2 <- sample(real_r2, 1)
+    target_r2 <- real_r2[sample.int(length(real_r2), 1)]
   } else {
     # Parametric default
     target_r2 <- rbeta(1, shape1 = 5, shape2 = 5) * 0.8 + 0.05
@@ -318,18 +325,18 @@ draw_acic_params_v2 <- function(seed, real_r2 = NULL, real_y_mean = NULL,
   # signal to achieve these targets without a post-hoc affine transform.
   if (!is.null(real_y_mean) && !is.null(real_y_sd) &&
       length(real_y_mean) == length(real_y_sd)) {
-    joint_idx <- sample(length(real_y_mean), 1)
+    joint_idx <- sample.int(length(real_y_mean), 1)
     target_y_mean <- real_y_mean[joint_idx]
     target_y_sd   <- real_y_sd[joint_idx]
   } else {
-    # Parametric defaults (independent draws)
+    # Independent draws: user vector if given, else parametric default
     if (!is.null(real_y_mean)) {
-      target_y_mean <- sample(real_y_mean, 1)
+      target_y_mean <- real_y_mean[sample.int(length(real_y_mean), 1)]
     } else {
       target_y_mean <- rnorm(1, mean = 8.5, sd = 6)
     }
     if (!is.null(real_y_sd)) {
-      target_y_sd <- sample(real_y_sd, 1)
+      target_y_sd <- real_y_sd[sample.int(length(real_y_sd), 1)]
     } else {
       target_y_sd <- max(0.5, abs(rnorm(1, mean = 4, sd = 2)))  # floor avoids degenerate scale
     }
@@ -349,36 +356,34 @@ draw_acic_params_v2 <- function(seed, real_r2 = NULL, real_y_mean = NULL,
 
   # Draw CATE coefficients independently for each contrast.
   #
-  # V3b calibration notes:
-  #   - Coefficient SDs boosted by ~1.3× to increase raw CATE magnitude.
-  #     Combined with signal scaling, this brings the typical largest
-  #     absolute treatment effect to about 1.8.
-  #   - Positive TE bias: intercepts/effects are shifted upward so CATEs
-  #     are not centered at 0 (mean effect around +0.4).
+  # Calibration: coefficient scales are chosen so that, after signal
+  # scaling, the typical largest absolute treatment effect is about 1.8.
+  # Intercepts/effects are shifted upward so CATEs are not centered at 0
+  # (mean effect around +0.4).
   draw_cate_coefs <- function(cate_type) {
     cc <- list()
     if (cate_type == "constant") {
-      cc$effect <- runif(1, -0.5, 1.5)           # positive bias (was -1,1)
+      cc$effect <- runif(1, -0.5, 1.5)
     } else if (cate_type == "sparse_linear") {
-      cc$intercept  <- runif(1, -0.15, 0.45)     # shifted +0.15
-      cc$coef_cont1 <- rnorm(1, sd = 0.52)       # 1.3× boost
-      cc$coef_cont2 <- rnorm(1, sd = 0.39)       # 1.3× boost
-      cc$coef_bin1  <- rnorm(1, sd = 0.325)      # 1.3× boost
+      cc$intercept  <- runif(1, -0.15, 0.45)
+      cc$coef_cont1 <- rnorm(1, sd = 0.52)
+      cc$coef_cont2 <- rnorm(1, sd = 0.39)
+      cc$coef_bin1  <- rnorm(1, sd = 0.325)
     } else if (cate_type == "smooth_nonlinear") {
-      cc$coef_sin      <- rnorm(1, sd = 0.52)    # 1.3× boost
-      cc$coef_quad     <- rnorm(1, sd = 0.39)    # 1.3× boost
-      cc$coef_interact <- rnorm(1, sd = 0.26)    # 1.3× boost
-      cc$intercept     <- runif(1, -0.05, 0.35)  # shifted +0.15
+      cc$coef_sin      <- rnorm(1, sd = 0.52)
+      cc$coef_quad     <- rnorm(1, sd = 0.39)
+      cc$coef_interact <- rnorm(1, sd = 0.26)
+      cc$intercept     <- runif(1, -0.05, 0.35)
     } else if (cate_type == "step_function") {
       cc$threshold <- runif(1, 0.3, 0.7)
-      cc$hi_effect <- rnorm(1, mean = 0.65, sd = 0.39)  # shifted +0.15, 1.3× sd
-      cc$lo_effect <- rnorm(1, mean = -0.05, sd = 0.26) # shifted +0.15, 1.3× sd
-      cc$coef_bin1 <- rnorm(1, sd = 0.325)               # 1.3× boost
+      cc$hi_effect <- rnorm(1, mean = 0.65, sd = 0.39)
+      cc$lo_effect <- rnorm(1, mean = -0.05, sd = 0.26)
+      cc$coef_bin1 <- rnorm(1, sd = 0.325)
     } else if (cate_type == "interaction") {
-      cc$coef1     <- rnorm(1, sd = 0.52)         # 1.3× boost
-      cc$coef2     <- rnorm(1, sd = 0.39)         # 1.3× boost
-      cc$coef3     <- rnorm(1, sd = 0.26)         # 1.3× boost
-      cc$intercept <- runif(1, -0.05, 0.35)       # shifted +0.15
+      cc$coef1     <- rnorm(1, sd = 0.52)
+      cc$coef2     <- rnorm(1, sd = 0.39)
+      cc$coef3     <- rnorm(1, sd = 0.26)
+      cc$intercept <- runif(1, -0.05, 0.35)
     }
     cc
   }
@@ -400,8 +405,7 @@ draw_acic_params_v2 <- function(seed, real_r2 = NULL, real_y_mean = NULL,
     cate_types     = cate_types,
     cate_coefs     = cate_coefs,
     bin_probs      = bin_probs,
-    zero_fracs     = zero_fracs,
-    heteroscedastic = FALSE   # Homoscedastic for clean R² calibration
+    zero_fracs     = zero_fracs
   )
 }
 
@@ -427,9 +431,14 @@ draw_acic_params_v2 <- function(seed, real_r2 = NULL, real_y_mean = NULL,
 #              ate_rms normalization). Default 0.30 gives a median
 #              largest absolute treatment effect of about 1.8.
 #
-# Returns: list with Y, Z, X, tau_true, raw_cats, pi_matrix, noise_sd,
-#          sigma_x, cate_types, target_r2, target_y_mean, target_y_sd,
-#          tau_scale, mu_a_scale, signal_scale
+# Returns: list with Y, Z, X, tau_true, raw_cats, pi_matrix (true
+#          propensities), noise_sd, cate_types, target_r2, target_y_mean,
+#          target_y_sd, tau_scale, mu_a_scale
+#
+# Note: tau_scale and mu_a_scale are computed from each generated sample,
+# so a train/test pair drawn from the same params has very slightly
+# different effect scales (typically under 0.5% apart). Truth files always
+# use the scale of the sample they belong to.
 # =============================================================================
 generate_acic_mirror_v2 <- function(n = 1000, params = NULL, seed = NULL,
                                      tau_frac = 0.30) {
@@ -459,7 +468,7 @@ generate_acic_mirror_v2 <- function(n = 1000, params = NULL, seed = NULL,
   # ---- 4. Prognostic surface: complex random mu_a ----
   mu_a <- compute_complex_mu_a(X, params$mu_a_spec)
 
-  # ---- 5. Two-step signal scaling (V3b) ----
+  # ---- 5. Two-step signal scaling ----
   #
   # Step A: Scale tau proportional to target_y_sd (R²-independent).
   #   This ensures te_max_abs ∝ target_y_sd (larger-scale outcomes get larger effects).
@@ -506,7 +515,6 @@ generate_acic_mirror_v2 <- function(n = 1000, params = NULL, seed = NULL,
   # ---- 6. Noise ----
   # noise_sd is derived directly from the target variance decomposition.
   noise_sd <- params$target_y_sd * sqrt(1 - target_r2)
-  sigma_x  <- rep(noise_sd, n)
   epsilon  <- rnorm(n, sd = noise_sd)
 
   # ---- 7. Outcome ----
@@ -524,18 +532,15 @@ generate_acic_mirror_v2 <- function(n = 1000, params = NULL, seed = NULL,
     Z              = Z,
     X              = X,
     tau_true       = tau_true,
-    raw_cats       = cov_data$raw_cats,   # <-- NEW: for format_acic_csv()
+    raw_cats       = cov_data$raw_cats,   # raw categorical levels, for format_acic_csv()
     pi_matrix      = pi_matrix,
     noise_sd       = noise_sd,
-    sigma_x        = sigma_x,
     cate_types     = params$cate_types,
     target_r2      = params$target_r2,
     target_y_mean  = params$target_y_mean,
     target_y_sd    = params$target_y_sd,
     tau_scale      = tau_scale,
-    mu_a_scale     = mu_a_scale,
-    signal_scale   = tau_scale,  # backward compat
-    heteroscedastic = FALSE
+    mu_a_scale     = mu_a_scale
   )
 }
 
@@ -607,4 +612,31 @@ format_acic_csv <- function(sim) {
   df <- cbind(df, zi_df)
 
   df
+}
+
+
+# =============================================================================
+# population_colmeans(): Exact population means of the 54 encoded covariates
+#
+# Used as the x_bar_pop input for model-based PATE estimation. Column order
+# matches generate_acic_covariates() and prepare_covariates():
+#   categorical level k of a J-level variable: 1/J (levels are uniform)
+#   binary x7-x25:          params$bin_probs
+#   continuous x26-x37:     0.5 (Uniform(0, 1))
+#   zero-inflated x38-x40:  (1 - params$zero_fracs) * 0.5
+#
+# Args:
+#   params — output of draw_acic_params_v2()
+#
+# Returns: numeric vector of length 54
+# =============================================================================
+population_colmeans <- function(params) {
+  cat_means <- unlist(lapply(CAT_LEVELS, function(J) rep(1 / J, J - 1)),
+                      use.names = FALSE)
+  means <- c(cat_means,                       # 20 columns
+             params$bin_probs,                # 19 columns
+             rep(0.5, 12),                    # 12 columns
+             (1 - params$zero_fracs) * 0.5)   #  3 columns
+  stopifnot(length(means) == 54)
+  means
 }

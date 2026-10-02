@@ -16,7 +16,7 @@ $$\text{CATE}_w(x) = \gamma_w + x' \delta_w$$
 
 where $w$ denotes the treatment contrast (e.g., treatment $b$ vs. reference treatment $a$), $\gamma_w$ is the intercept, and $\delta_w$ is a vector of covariate slopes with horseshoe priors. The horseshoe prior shrinks small effects toward zero while preserving the magnitude of large effects, providing automatic variable selection without explicit thresholding.
 
-We implement a custom Gibbs sampler that produces 3,000 post-burn-in MCMC draws (following a 1,000-iteration burn-in period). Each draw yields posterior samples of $(\gamma_w, \delta_w)$, which we use to compute point estimates (posterior means) and posterior credible intervals. The linearity of this specification enables efficient computation of population-level effects (PATE) via integration over the empirical covariate distribution.
+We implement a custom Gibbs sampler that produces 3,000 post-burn-in MCMC draws (following a 1,000-iteration burn-in period). Each draw yields posterior samples of $(\gamma_w, \delta_w)$, which we use to compute point estimates (posterior means) and posterior credible intervals. The linearity of this specification enables efficient computation of population-level effects (PATE) from supplied population covariate means.
 
 ### Component 2: Generalized Random Forest
 
@@ -86,10 +86,11 @@ The repository ships 50 simulated datasets with known true effects (`example/dat
 | iCATE 95% CI coverage | 0.943 | 0.970 |
 | Treatment assignment accuracy | 0.886 | 1.000 |
 | sCATE 95% CI coverage | 0.940 | 1.000 |
+| subCATE 95% CI coverage | 0.770 | 0.750 |
 | PATE 95% CI coverage | 0.850 | 1.000 |
 
-The example simulator draws outcome scale and R² from simple parametric defaults, so these numbers are not directly comparable to the tuning benchmark above. PATE intervals undercover: the PATE z-multiplier (2.0) was never tuned. See `docs/METHOD_DETAILS.md` for full details and limitations.
+The example simulator draws outcome scale and R² from simple parametric defaults, so these numbers are not directly comparable to the tuning benchmark above. subCATE and PATE intervals undercover: the subCATE standard error is computed for the n-denominator form of the estimand while the reported estimate is the within-stratum mean, and the PATE z-multiplier (2.0) was never tuned. See `docs/METHOD_DETAILS.md` for full details and limitations.
 
 ## Software
 
-The implementation is in R and depends only on `grf`, `ranger`, and `sandwich`. See the repository README for setup and usage.
+The implementation is in R and depends only on `grf`; the Horseshoe sampler and the simulator use base R. See the repository README for setup and usage.

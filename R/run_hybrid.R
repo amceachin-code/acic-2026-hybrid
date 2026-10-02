@@ -11,13 +11,17 @@
 #
 # Arguments:
 #   data_csv       Input file. If named data_<id>.csv, <id> is used for
-#                  output file names and as the default seed; otherwise 1.
+#                  output file names and as the default seed; otherwise the
+#                  id is 1 (with a warning, since outputs could collide).
 #   output_dir     Directory for output CSVs (created if missing).
 #   pop_means_csv  Optional. Population means of the 54 encoded covariates
 #                  (CSV with a 'mean' column, as written by
 #                  dgp/generate_data.R). Enables the model-based PATE.
-#                  Without it, PATE falls back to the sCATE.
-#   seed           Optional integer RNG seed (default: dataset id).
+#                  Without it, PATE falls back to the sCATE. Pass "" to
+#                  skip it while still giving a seed.
+#   seed           Optional integer seed for the Horseshoe Gibbs sampler
+#                  (default: dataset id). GRF always uses its own fixed
+#                  seed (42, set in R/fit_hybrid.R).
 #
 # Example:
 #   Rscript R/run_hybrid.R example/data/train/data_1.csv example/output \
@@ -31,22 +35,18 @@
 #   dataset_<id>_pbest_probs.csv       P(each arm is best) per unit
 #   A "TIMING|<id>|hybrid|<seconds>|<mean CI width>" line on stdout
 #
-# Dependencies: grf, ranger, sandwich (install via setup.sh)
+# Dependencies: grf (install via setup.sh)
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Repo root detection: works when called via Rscript from any directory
+# Repo root: the parent of this script's folder (works from any directory)
 # ---------------------------------------------------------------------------
-get_repo_root <- function() {
-  cmd_args <- commandArgs(trailingOnly = FALSE)
-  file_arg <- grep("--file=", cmd_args, value = TRUE)
-  if (length(file_arg) > 0) {
-    script_path <- normalizePath(sub("--file=", "", file_arg[1]))
-    return(dirname(dirname(script_path)))  # up from R/ to repo root
-  }
+script_file <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))
+REPO_ROOT <- if (length(script_file) > 0) {
+  normalizePath(file.path(dirname(script_file[1]), ".."))
+} else {
   normalizePath(getwd())
 }
-REPO_ROOT <- get_repo_root()
 
 # ---------------------------------------------------------------------------
 # Arguments
@@ -66,20 +66,34 @@ if (!file.exists(data_csv)) {
 }
 
 # Dataset id from the file name (data_<id>.csv), else 1
-id_match   <- regmatches(basename(data_csv), regexec("^data_(\\d+)\\.csv$", basename(data_csv)))[[1]]
-dataset_id <- if (length(id_match) == 2) as.integer(id_match[2]) else 1L
-seed       <- if (length(args) >= 4) as.integer(args[4]) else dataset_id
+id_match <- regmatches(basename(data_csv), regexec("^data_(\\d+)\\.csv$", basename(data_csv)))[[1]]
+if (length(id_match) == 2) {
+  dataset_id <- as.integer(id_match[2])
+} else {
+  dataset_id <- 1L
+  warning(sprintf("'%s' is not named data_<id>.csv; using id 1 for output names. ",
+                  basename(data_csv)),
+          "Outputs from other such files in the same directory would be overwritten.",
+          call. = FALSE)
+}
+seed <- if (length(args) >= 4) suppressWarnings(as.integer(args[4])) else dataset_id
+if (is.na(seed)) {
+  cat(sprintf("ERROR: seed must be an integer (got '%s')\n", args[4]))
+  quit(status = 1)
+}
+if (!is.null(pop_csv) && !file.exists(pop_csv)) {
+  cat(sprintf("ERROR: Population means file not found: %s\n", pop_csv))
+  quit(status = 1)
+}
 
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 # ---------------------------------------------------------------------------
 # Libraries and method code
 # ---------------------------------------------------------------------------
-suppressPackageStartupMessages({
-  library(grf)
-  library(ranger)
-  library(sandwich)  # HC1 robust SEs (used by fit_ols.R)
-})
+# Only grf is needed. fit_ols.R is sourced for build_linear_data(), which the
+# Horseshoe uses; its OLS estimators (which need sandwich) are not called.
+suppressPackageStartupMessages(library(grf))
 
 for (f in c("prepare_covariates.R", "fit_ols.R", "horseshoe_gibbs.R",
             "fit_horseshoe.R", "compute_p_best.R", "compute_aggregate_se.R",
@@ -98,14 +112,19 @@ if (length(missing_cols) > 0) {
   quit(status = 1)
 }
 
-# A deterministic per-dataset seed makes results identical across runs,
-# regardless of process scheduling or parallelism order.
+# A deterministic per-dataset seed makes the Horseshoe draws identical across
+# runs, regardless of process scheduling or parallelism order.
 set.seed(seed)
 
 x_bar_pop <- NULL
 if (!is.null(pop_csv)) {
-  x_bar_pop <- read.csv(pop_csv)$mean
-  stopifnot(length(x_bar_pop) == 54)
+  pop_df <- read.csv(pop_csv)
+  if (!"mean" %in% names(pop_df) || nrow(pop_df) != 54) {
+    cat(sprintf("ERROR: %s must have a 'mean' column with 54 rows (got %d rows)\n",
+                pop_csv, nrow(pop_df)))
+    quit(status = 1)
+  }
+  x_bar_pop <- pop_df$mean
   cat(sprintf("  [PATE] Loaded population covariate means from %s\n", pop_csv))
 } else {
   cat("  [PATE] No population means supplied; PATE will fall back to sCATE\n")

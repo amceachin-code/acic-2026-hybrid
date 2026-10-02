@@ -5,8 +5,9 @@
 #   Builds a collection of simulated datasets for trying out, testing, and
 #   benchmarking the Hybrid ensemble. Each dataset "pair" shares one set of
 #   DGP parameters (CATE functions, arm probabilities, outcome scale, R²) but
-#   has independent observations for train and test, so the pair supports
-#   both in-sample and out-of-sample evaluation.
+#   has independent observations for train and test. R/run_hybrid.R fits and
+#   predicts on one file; the test files are provided for users who want to
+#   build their own out-of-sample evaluation.
 #
 #   Everything here is simulated. No contest data is read.
 #
@@ -34,33 +35,30 @@
 #                               types, and the true PATE for each contrast
 #
 # Design notes:
-#   - Population covariate means are computed analytically from the DGP
-#     parameters, so the PATE target is exact rather than estimated:
-#       categorical level k of a J-level variable: 1/J (uniform levels)
-#       binary x7-x25: the dataset's Bernoulli probability
-#       continuous x26-x37: 0.5 (Uniform(0, 1))
-#       zero-inflated x38-x40: (1 - zero_frac) * 0.5
+#   - Population covariate means are computed exactly from the DGP
+#     parameters by population_colmeans() in dgp/mirror_dgp.R.
 #   - The true PATE needs E[tau(X)] over the population. The simulator scales
 #     the raw CATE surface by a factor computed on each sample, so we use the
 #     TRAINING sample's tau_scale and average the raw surface over a large
 #     Monte Carlo draw (N_POP_MC rows) of population covariates.
+#   - Each sample's effect scale is computed from that sample, so train and
+#     test differ very slightly; metadata.csv records the train values
+#     (train_tau_scale, train_noise_sd), matching the PATE target.
+#   - Existing train/test/truth/pop files in out_dir are removed first, so
+#     the folder always matches metadata.csv.
 #
 # Runtime: about 1 to 2 seconds per pair.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Repo root detection: works when called via Rscript from any directory
+# Repo root: the parent of this script's folder (works from any directory)
 # ---------------------------------------------------------------------------
-get_repo_root <- function() {
-  cmd_args <- commandArgs(trailingOnly = FALSE)
-  file_arg <- grep("--file=", cmd_args, value = TRUE)
-  if (length(file_arg) > 0) {
-    script_path <- normalizePath(sub("--file=", "", file_arg[1]))
-    return(dirname(dirname(script_path)))  # up from dgp/ to repo root
-  }
+script_file <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))
+REPO_ROOT <- if (length(script_file) > 0) {
+  normalizePath(file.path(dirname(script_file[1]), ".."))
+} else {
   normalizePath(getwd())
 }
-REPO_ROOT <- get_repo_root()
 
 # ---------------------------------------------------------------------------
 # Arguments
@@ -93,38 +91,20 @@ SEED_TRAIN  <- 100000L   # Train seed for dataset i:  100000 + i
 SEED_TEST   <- 200000L   # Test seed for dataset i:   200000 + i
 SEED_POP    <- 300000L   # Population MC seed:        300000 + i
 
-for (sub in c("train", "test", "truth", "pop")) {
-  dir.create(file.path(OUT_DIR, sub), recursive = TRUE, showWarnings = FALSE)
+for (d in c("train", "test", "truth", "pop")) {
+  unlink(file.path(OUT_DIR, d), recursive = TRUE)   # avoid stale files
+  dir.create(file.path(OUT_DIR, d), recursive = TRUE, showWarnings = FALSE)
 }
 
 cat(sprintf("Generating %d simulated train/test pairs (preset: %s)\n",
             N_DATASETS, PRESET))
 cat(sprintf("Output: %s\n", normalizePath(OUT_DIR)))
 
-# ---------------------------------------------------------------------------
-# population_colmeans(params): exact means of the 54 encoded covariates
-#
-# Column order matches prepare_covariates() in R/prepare_covariates.R and
-# generate_acic_covariates() in dgp/mirror_dgp.R: 20 one-hot categorical
-# (level 1 dropped), 19 binary, 12 continuous, 3 zero-inflated.
-# ---------------------------------------------------------------------------
-population_colmeans <- function(params) {
-  n_levels <- c(3, 4, 3, 5, 4, 7)                       # x1-x6
-  cat_means <- unlist(lapply(n_levels, function(J) rep(1 / J, J - 1)))
-  means <- c(cat_means,                                 # 20 columns
-             params$bin_probs,                          # 19 columns
-             rep(0.5, 12),                              # 12 columns
-             (1 - params$zero_fracs) * 0.5)             #  3 columns
-  stopifnot(length(means) == 54)
-  means
-}
-
 # Helper: write a truth file for one sample
 write_truth <- function(tau, path) {
-  write.csv(data.frame(ID = seq_len(nrow(tau)),
-                       tau_b = tau[, "b"], tau_c = tau[, "c"],
-                       tau_d = tau[, "d"], tau_e = tau[, "e"]),
-            path, row.names = FALSE)
+  out <- data.frame(ID = seq_len(nrow(tau)), tau)
+  names(out) <- c("ID", paste0("tau_", colnames(tau)))   # tau_b ... tau_e
+  write.csv(out, path, row.names = FALSE)
 }
 
 # ---------------------------------------------------------------------------
@@ -176,8 +156,8 @@ for (i in seq_len(N_DATASETS)) {
     cate_type_d   = params$cate_types["d"], cate_type_e = params$cate_types["e"],
     pate_true_b   = pate_true["b"], pate_true_c = pate_true["c"],
     pate_true_d   = pate_true["d"], pate_true_e = pate_true["e"],
-    tau_scale     = sim_train$tau_scale,
-    noise_sd      = sim_train$noise_sd,
+    train_tau_scale = sim_train$tau_scale,
+    train_noise_sd  = sim_train$noise_sd,
     stringsAsFactors = FALSE, row.names = NULL
   )
 
@@ -194,8 +174,8 @@ write.csv(metadata, file.path(OUT_DIR, "metadata.csv"), row.names = FALSE)
 # ---------------------------------------------------------------------------
 stopifnot(
   nrow(metadata) == N_DATASETS,
-  length(list.files(file.path(OUT_DIR, "train"), pattern = "^data_\\d+\\.csv$")) >= N_DATASETS,
-  length(list.files(file.path(OUT_DIR, "pop"),   pattern = "\\.csv$")) >= N_DATASETS
+  length(list.files(file.path(OUT_DIR, "train"), pattern = "^data_\\d+\\.csv$")) == N_DATASETS,
+  length(list.files(file.path(OUT_DIR, "pop"),   pattern = "\\.csv$")) == N_DATASETS
 )
 types <- table(unlist(metadata[, paste0("cate_type_", c("b", "c", "d", "e"))]))
 cat("\nRealized CATE type mix across all contrasts:\n")

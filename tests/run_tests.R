@@ -2,7 +2,7 @@
 # tests/run_tests.R: Self-contained checks for the Hybrid ensemble repository
 #
 # Usage:
-#   Rscript tests/run_tests.R          # fast unit checks (~5 seconds)
+#   Rscript tests/run_tests.R          # fast unit checks (about 1 second)
 #   Rscript tests/run_tests.R --full   # also runs one end-to-end fit (~20 s)
 #
 # Uses base R only (stopifnot), so no test framework is needed. Each check
@@ -12,22 +12,23 @@
 #   1. Simulator: output shape, ACIC file layout, reproducibility by seed,
 #      and train/test pairs sharing one DGP
 #   2. Covariate encoding: 54 columns, drop-first one-hot, values preserved
-#   3. Population means: exact formula used by dgp/generate_data.R agrees
-#      with a large Monte Carlo draw
+#   3. Population means: population_colmeans() (used by dgp/generate_data.R)
+#      agrees with a large Monte Carlo draw
 #   4. PATE from posterior draws: recovers a known linear CATE exactly
 #   5. P(best): probabilities are valid and pick the obviously best arm
-#   6. (--full) End-to-end: R/run_hybrid.R writes well-formed outputs
+#   6. (--full) End-to-end: R/run_hybrid.R, with population means, writes
+#      well-formed outputs including a model-based PATE
 # ===========================================================================
 
-get_repo_root <- function() {
-  cmd_args <- commandArgs(trailingOnly = FALSE)
-  file_arg <- grep("--file=", cmd_args, value = TRUE)
-  if (length(file_arg) > 0) {
-    return(dirname(dirname(normalizePath(sub("--file=", "", file_arg[1])))))
-  }
+# ---------------------------------------------------------------------------
+# Repo root: the parent of this script's folder (works from any directory)
+# ---------------------------------------------------------------------------
+script_file <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))
+REPO_ROOT <- if (length(script_file) > 0) {
+  normalizePath(file.path(dirname(script_file[1]), ".."))
+} else {
   normalizePath(getwd())
 }
-REPO_ROOT <- get_repo_root()
 FULL <- "--full" %in% commandArgs(trailingOnly = TRUE)
 
 source(file.path(REPO_ROOT, "dgp", "mirror_dgp.R"))
@@ -67,14 +68,23 @@ check("simulator: same seed reproduces the same data", {
   stopifnot(identical(sim_a$Y, sim_b$Y), identical(sim_a$Z, sim_b$Z))
 })
 check("simulator: different seed gives new rows from the same DGP", {
-  stopifnot(!identical(sim_a$Y, sim_c$Y),
-            identical(sim_a$cate_types, sim_c$cate_types))
+  # Same params => same CATE function: on a fixed covariate matrix, the raw
+  # surface is identical, and each sample's truth is that surface rescaled.
+  stopifnot(!identical(sim_a$Y, sim_c$Y))
+  raw_a <- compute_cate_surface(sim_a$X, params)
+  stopifnot(max(abs(sim_a$tau_true - raw_a * sim_a$tau_scale)) < 1e-10)
+  raw_c <- compute_cate_surface(sim_c$X, params)
+  stopifnot(max(abs(sim_c$tau_true - raw_c * sim_c$tau_scale)) < 1e-10)
+})
+check("simulator: a single supplied value is used as-is (not sample(1:x))", {
+  p1 <- draw_acic_params_v2(seed = 1, real_r2 = 0.6, real_y_mean = 8.5, real_y_sd = 3)
+  stopifnot(p1$target_r2 == 0.6, p1$target_y_mean == 8.5, p1$target_y_sd == 3)
 })
 check("simulator: parametric defaults stay in range", {
   draws <- lapply(1:200, function(s) draw_acic_params_v2(seed = s))
   r2 <- sapply(draws, `[[`, "target_r2")
-  sd <- sapply(draws, `[[`, "target_y_sd")
-  stopifnot(all(r2 > 0.05 & r2 < 0.85), all(sd >= 0.5))
+  ysd <- sapply(draws, `[[`, "target_y_sd")
+  stopifnot(all(r2 > 0.05 & r2 < 0.85), all(ysd >= 0.5))
 })
 
 # ---------------------------------------------------------------------------
@@ -89,13 +99,10 @@ check("encoding: matches the simulator's internal 54-column matrix", {
 })
 
 # ---------------------------------------------------------------------------
-# 3. Population covariate means (formula from dgp/generate_data.R)
+# 3. Population covariate means (population_colmeans in dgp/mirror_dgp.R)
 # ---------------------------------------------------------------------------
-check("population means: exact formula agrees with Monte Carlo", {
-  n_levels  <- c(3, 4, 3, 5, 4, 7)
-  cat_means <- unlist(lapply(n_levels, function(J) rep(1 / J, J - 1)))
-  exact <- c(cat_means, params$bin_probs, rep(0.5, 12),
-             (1 - params$zero_fracs) * 0.5)
+check("population means: population_colmeans() agrees with Monte Carlo", {
+  exact <- population_colmeans(params)
   set.seed(10)
   mc <- colMeans(generate_acic_covariates(200000, params$bin_probs,
                                           params$zero_fracs)$X)
@@ -144,21 +151,28 @@ if (FULL) {
   check("end-to-end: run_hybrid.R writes well-formed outputs", {
     tmp <- tempfile("hybrid_test_")
     dir.create(tmp)
+    on.exit(unlink(tmp, recursive = TRUE), add = TRUE)   # clean up on failure too
     sim <- generate_acic_mirror_v2(n = 1000, params = params, seed = 7)
     write.csv(format_acic_csv(sim), file.path(tmp, "data_7.csv"), row.names = FALSE)
-    status <- system2("Rscript",
+    write.csv(data.frame(column = 1:54, mean = population_colmeans(params)),
+              file.path(tmp, "pop.csv"), row.names = FALSE)
+    log_file <- file.path(tmp, "run.log")
+    status <- system2(file.path(R.home("bin"), "Rscript"),
                       c(file.path(REPO_ROOT, "R", "run_hybrid.R"),
-                        file.path(tmp, "data_7.csv"), tmp),
-                      stdout = FALSE, stderr = FALSE)
-    stopifnot(status == 0)
+                        file.path(tmp, "data_7.csv"), tmp, file.path(tmp, "pop.csv")),
+                      stdout = log_file, stderr = log_file)
+    stopifnot(status == 0,
+              any(grepl("PATE computed", readLines(log_file))))   # model-based PATE path
     ic  <- read.csv(file.path(tmp, "dataset_7_icates.csv"))
     agg <- read.csv(file.path(tmp, "dataset_7_aggregates.csv"))
     pb  <- read.csv(file.path(tmp, "dataset_7_pbest_probs.csv"))
+    sc  <- agg$Estimate[agg$estimand == "sCATE"]
+    pa  <- agg$Estimate[agg$estimand == "PATE"]
     stopifnot(nrow(ic) == 1000, all(is.finite(as.matrix(ic))),
               all(ic$tau_b_L95 <= ic$tau_b & ic$tau_b <= ic$tau_b_U95),
               all(c("sCATE", "subCATE", "PATE") %in% agg$estimand),
+              length(pa) == 4, all(is.finite(pa)), !identical(pa, sc),
               max(abs(rowSums(pb[, paste0("P_", c("a", "b", "c", "d", "e"))]) - 1)) < 1e-8)
-    unlink(tmp, recursive = TRUE)
   })
 }
 
